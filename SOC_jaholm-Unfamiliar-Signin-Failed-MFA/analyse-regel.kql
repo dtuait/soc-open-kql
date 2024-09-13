@@ -1,0 +1,57 @@
+//
+//  EXPLANATION OF KQL QUERY:
+//  
+//  We find specific failed login attempts where the user failed MFA and where the login attempt has triggered an Unfamiliar Sign-In Properties alert
+//  This also implicitly filters to failed login attempts where the user provided the correct password 
+//  Then we sort out all OriginalRequestID's which also has a successful login tied to them (where presumably, the user, during the same login session, fails and then succeeds the MFA)
+//  We are then left with only completely failed login attempts, that triggered a Unfamiliar Sign-In Properties alert and where the user used the correct password but failed the MFA
+//
+// Find all Unfamiliar Sign-In Properties alerts where one of the unfamiliar properties are "Location" 
+let Unfamiliar_signin_propertiesAlert = 
+    SecurityAlert
+    | where AlertName == "Unfamiliar sign-in properties"
+    | where Description has "Location"
+    | extend OriginalRequestId = tostring(parse_json(ExtendedProperties)["Request Id"])
+    | extend AadUserID = parse_json(Entities)[0].AadUserId
+;
+let Failed_Logins = SigninLogs
+//Find logins NOT from DK
+| where not (isempty(Location))
+| where Location != "DK"
+// Filter SignInLogs to only include entries where the result indicates a "Failed MFA" attempt
+// This also implicitly filters to entries where the user provided the correct password
+//50074 - Strong Authentication is required.
+//50076 - Due to a configuration change made by your administrator, or because you moved to a new location, you must use multi-factor authentication to access the resource.
+//50087 - A transient error has occurred during strong authentication. Please try again.
+//500121 - Authentication failed during strong authentication request 
+| where ResultType in ("50074","50076","50087","500121")
+//Extract useful information, which we can send to the user
+| extend LocationDetailsJson = parse_json(LocationDetails)
+| extend  City = tostring(LocationDetailsJson.city), 
+          State = tostring(LocationDetailsJson.state), 
+          CountryOrRegion = tostring(LocationDetailsJson.countryOrRegion)
+| extend FriendlyLocation = strcat(City, ", ", State, ", ", CountryOrRegion)
+// Filter to only include those failed login attempts that also triggered an Unfamiliar SignIn Properties alert
+| join kind=innerunique (Unfamiliar_signin_propertiesAlert) on OriginalRequestId
+;
+SigninLogs
+//Filter out those login attempts which failed at some point, but ended up succeeding
+| where ResultType !in ("50074","50076","50087","500121")
+| join kind=rightanti (Failed_Logins) on OriginalRequestId
+| project
+TimeGenerated,
+UserDisplayName,
+UserPrincipalName,
+AadUserID,
+FriendlyLocation,
+IPAddress,
+Status,
+ResultType,
+ResultDescription,
+OriginalRequestId,
+AuthenticationDetails,
+DeviceDetail,
+RiskEventTypes_V2,
+RiskLevelAggregated,
+RiskLevelDuringSignIn,
+RiskState
